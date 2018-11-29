@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 
-dirty hack to export and reconsitute logfiles from elasticsearch/kibana
+don't look at this, it's ugly.  look away, before you are offended!
+
+this is a dirty hack to export and reconsitute logfiles from elasticsearch/kibana
 
 should probably use pyes, but i'm deep enough into this now...
 
