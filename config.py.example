@@ -1,0 +1,2 @@
+auth = ("yourusername", "yourpassword")
+baseurl = "https://your.kibana.host/"

@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+
+dirty hack to export and reconsitute logfiles from elasticsearch/kibana
+
+should probably use pyes, but i'm deep enough into this now...
+
+This isn't the most efficient, it bunkers a lot off disk, but it's meant to be robust and re-startable.
+
+best run as:
+
+    PYTHONUNBUFFERED=true TZ=GMT ./rehydrate 20
+
+see config.py
+
+"""
+
+import requests
+import sys
+import base64
+import json
+import os
+import time
+
+# just create password.py and put a line in it like:
+#   auth=("username", "password")
+import config
+
+auth=config.auth
+
+requests.packages.urllib3.disable_warnings()
+
+query = {
+  "sort": [
+    {
+      "@timestamp": {
+        "order": "desc",
+        "unmapped_type": "boolean"
+      }
+    }
+  ],
+  "_source": {
+    "excludes": []
+  },
+  "aggs": {
+    "2": {
+      "date_histogram": {
+        "field": "@timestamp",
+        "interval": "30s",
+        "time_zone": "America/Denver",
+        "min_doc_count": 1
+      }
+    }
+  },
+  "stored_fields": [
+    "*"
+  ],
+  "script_fields": {},
+  "docvalue_fields": [
+    "@timestamp",
+    "parsedJson.response.Payments.Recurring.Recur_Auto_Next_Run_Date",
+    "parsedJson.response.getTemplate.auto_next_run_date",
+    "parsedJson.response.getTemplate.end_date",
+    "parsedJson.response.getTemplate.ord_ent_dt",
+    "parsedJson.response.getTemplate.start_date",
+    "parsedJson.response.listAutoOrders.row.auto_next_run_date",
+    "parsedJson.response.listAutoOrders.row.entry_date",
+    "parsedJson.response.listAutoOrders.row.start_date",
+    "parsedJson.response.listOrders.row.entry_date",
+    "parsedJson.response.ord_ent_dt"
+  ],
+  "query": {
+    "bool": {
+      "must": [
+        {
+          "query_string": {
+            "query": "log:*",
+            "analyze_wildcard": True,
+            "default_field": "*"
+          }
+        },
+        {
+          "range": {
+            "@timestamp": {
+              "gt": 1543421728479,
+              "lte": 1543421728779,
+              "format": "epoch_millis"
+            }
+          }
+        }
+      ],
+      "filter": [],
+      "should": [],
+      "must_not": []
+    }
+  }
+}
+
+################################################################################
+def indexname(epoch_millis):
+     return time.strftime("filebeat-%m.%d.%Y", time.localtime(epoch_millis / 1000))
+
+################################################################################
+def get_logs(timerange):
+    indexes = set([indexname(timerange['gt']), indexname(timerange['lte'])])
+    for index in indexes:
+        get_logs_index(timerange, index)
+
+################################################################################
+def logf(msg, *args, **kwargs):
+    sys.stdout.write(msg.format(*args, **kwargs))
+
+################################################################################
+class EsQuery:
+    index = None
+    query = None
+    scroll = None
+    done = 0
+
+    def __init__(self, index, query):
+        self.index = index
+        self.query = query
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self.query:
+            raise StopIteration
+
+        if self.scroll:
+            url = "{}/_search/scroll".format(config.baseurl)
+        else:
+            url = "{}/{}/_search?scroll=1m".format(config.baseurl, self.index)
+
+        data = self.get_data(requests.post(url, auth=config.auth, data=json.dumps(self.query), verify=False, stream=True, headers={"content-type": "application/json"}))
+
+        if not data:
+            raise StopIteration
+
+        if data.get('_scroll_id'):
+            self.query = dict(scroll='1m', scroll_id=data['_scroll_id'])
+            self.scroll = True
+        else:
+            self.query = None
+
+        hits = data.get('hits', {}).get('hits', [])
+        self.done += len(hits)
+        return self.done, data
+
+    def get_data(self, result):
+        # bounce this off disk incase it blows chunks, I can fix things and re-run without killing my past data
+        with open("buffer", "wb") as fd:
+            for chunk in result.iter_content(chunk_size=1024):
+                fd.write(chunk)
+        with open("buffer") as fd:
+            data = json.load(fd)
+            if data.get('error'):
+                logf("\nERROR! msg={}\n", data)
+                raise StopIteration
+            return data
+
+################################################################################
+def get_logs_index(timerange, index):
+    logf("{index} Interval {gt} ~ {lte}", index=index, **timerange)
+
+    query['query']['bool']['must'][1]['range']['@timestamp'] = timerange
+    logs = dict()
+    for count, data in EsQuery(index, query):
+        logf("  {}/{}\n", count, data['hits']['total'])
+        for log in data['hits']['hits']:
+            log = log['_source']
+            path = "./{index}/{client}/{env}/{host}".format(index=index, **log)
+            logfile = path + "/" + log['log']
+            if logs.get(logfile):
+                logfd = logs[logfile]
+            else:
+                if not os.path.exists(path):
+                    logf("CREATE {}\n", path)
+                    os.makedirs(path)
+                logfd = open(logfile + "_", "w")
+                logs[logfile] = logfd
+            logfd.write(log['message'] + "\n")
+
+    # second stage, append our reconstituted log to the existing one
+    for logfile in logs:
+        logs[logfile].close()
+        logf("LOG {}\n", logfile)
+        with open(logfile, "a") as outfile, open(logfile + "_") as infile:
+            for line in infile:
+                outfile.write(line)
+        os.unlink(logfile + "_")
+
+################################################################################
+# ugh, should be argparse
+daysback = int(sys.argv[1]) # this calculates epoch time back x days
+mins = 5 * 60 * 1000 # how many minutes to cull in a block
+now = time.time()
+start = now - (now % 86400) - (daysback*86400)
+start = int(start * 1000)
+
+# kick it up to millis
+now = now * 1000
+end = start + mins
+
+x = 0
+while start < now:
+    x += 1
+
+    get_logs(dict(gt=start, lte=end, format='epoch_millis' ))
+
+    end += mins
+    start += mins
+
+    break
