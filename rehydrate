@@ -11,9 +11,9 @@ This isn't the most efficient, it bunkers a lot off disk, but it's meant to be r
 
 best run as:
 
-    PYTHONUNBUFFERED=true TZ=GMT ./rehydrate 20
+    PYTHONUNBUFFERED=true TZ=GMT ./rehydrate
 
-see config.py
+see config.py for deets
 
 """
 
@@ -33,6 +33,7 @@ auth=config.auth
 requests.packages.urllib3.disable_warnings()
 
 query = {
+  "size": config.scroll_size,
   "sort": [
     {
       "@timestamp": {
@@ -140,13 +141,17 @@ class EsQuery:
         if not data:
             raise StopIteration
 
+        hits = data.get('hits', {}).get('hits', [])
+
+        if not len(hits):
+            raise StopIteration
+
         if data.get('_scroll_id'):
             self.query = dict(scroll='1m', scroll_id=data['_scroll_id'])
             self.scroll = True
         else:
             self.query = None
 
-        hits = data.get('hits', {}).get('hits', [])
         self.done += len(hits)
         return self.done, data
 
@@ -164,7 +169,7 @@ class EsQuery:
 
 ################################################################################
 def get_logs_index(timerange, index):
-    logf("{index} Interval {gt} ~ {lte}", index=index, **timerange)
+    logf("INTERVAL {index} {gt} ~ {lte}", index=index, **timerange)
 
     query['query']['bool']['must'][1]['range']['@timestamp'] = timerange
     logs = dict()
@@ -195,8 +200,8 @@ def get_logs_index(timerange, index):
 
 ################################################################################
 # ugh, should be argparse
-daysback = int(sys.argv[1]) # this calculates epoch time back x days
-mins = 5 * 60 * 1000 # how many minutes to cull in a block
+daysback = config.days_back # this calculates epoch time back x days
+mins = config.query_mins * 60 * 1000 # how many minutes to cull in a block
 now = time.time()
 start = now - (now % 86400) - (daysback*86400)
 start = int(start * 1000)
@@ -205,13 +210,10 @@ start = int(start * 1000)
 now = now * 1000
 end = start + mins
 
-x = 0
 while start < now:
-    x += 1
 
     get_logs(dict(gt=start, lte=end, format='epoch_millis' ))
 
     end += mins
     start += mins
 
-    break

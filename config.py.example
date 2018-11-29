@@ -1,2 +1,7 @@
+
+query_mins = 1 # how many minutes to include in a query
+days_back = 20 # how many days back to go?
+scroll_size = 5000 # how many items to request per page in our query scroll?
+
 auth = ("yourusername", "yourpassword")
 baseurl = "https://your.kibana.host/"
